@@ -1,0 +1,37 @@
+[project]
+name = "langgraph-docker-kickstart"
+version = "0.1.0"
+description = "A compact LangGraph, FastAPI, Vertex AI, and Docker POC."
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "langchain>=1.0,<2",
+    "langchain-google-genai>=4,<5",
+    "langgraph>=1.0,<2",
+    "langgraph-checkpoint-postgres>=3,<4",
+    "langsmith>=0.11,<1",
+    "psycopg[binary,pool]>=3.2,<4",
+    "pydantic-settings>=2.0,<3",
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "sqlmodel>=0.0.24,<0.1",
+    "uvicorn[standard]>=0.30,<1",
+]
+
+[project.optional-dependencies]
+model-garden = ["langchain-google-vertexai>=3,<4"]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1,<2",
+    "pytest>=8,<9",
+    "ruff>=0.11,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
