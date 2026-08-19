@@ -5,6 +5,7 @@ description = "A compact LangGraph, FastAPI, Vertex AI, and Docker POC."
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    "deepagents>=0.5.3,<1",
     "fastapi>=0.115,<1",
     "langchain>=1.0,<2",
     "langchain-google-genai>=4,<5",

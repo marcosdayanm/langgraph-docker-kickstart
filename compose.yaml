@@ -30,6 +30,7 @@ services:
       - "127.0.0.1:8000:8000"
     volumes:
       - ${GCP_ADC_PATH:?Set GCP_ADC_PATH in .env to your absolute ADC file path}:/gcp/adc.json:ro
+      - ./skills:/app/skills:ro
 
 volumes:
   postgres_data:

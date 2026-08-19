@@ -1,194 +1,198 @@
-# LangGraph + Docker POC
+# StoreMate: Deep Agents + Docker POC
 
-A deliberately small, explainable quick-start stack:
+A deliberately compact retail-sales demo: FastAPI, `create_deep_agent`, Gemini
+on Vertex AI, PostgreSQL persistence, and a small React/Tailwind chat UI.
 
-- Python 3.13 and `uv`
-- async FastAPI routes, kept together in one file
-- Gemini on Vertex AI with Google ADC
-- `create_agent`, which is a compiled LangGraph state graph
-- PostgreSQL for durable LangGraph checkpoints and a SQLModel conversation list
-- a single React chat page, served by FastAPI after the Docker build
+## Why this shape
 
-## Python layout
+PostgreSQL is both the LangGraph checkpointer and the cross-session store. It
+keeps the demo to two containers while providing durable conversation threads,
+interrupts, skills, and per-user memory in the `postgres_data` Docker volume.
+MongoDB would be reasonable if it were already the application database, but
+adds no benefit to this relational, thread-listing POC.
 
 ```text
-app/settings.py   # environment validation and URLs
-app/db.py         # SQLModel Conversation and async session setup
-app/langgraph.py  # model, tools, graph config, interrupt helpers
-app/main.py       # lifespan, typed DB dependency, and FastAPI routes
+React → FastAPI → Deep Agent → Gemini on Vertex AI
+                 │      ├── AsyncPostgresSaver (per-thread state + interrupts)
+                 │      └── AsyncPostgresStore (skills + cross-session memory)
+                 └── SQLModel (conversations, products, orders, order items)
 ```
 
-This is intentionally the full backend structure—there are no service or repository layers.
+`thread_id` is an opaque UUID in LangGraph config. `LOCAL_USER_ID` is a local
+demo identity used to namespace customer data; replace it with an authenticated
+user ID in a real app.
 
-## RPI: research → plan → implementation
+## Retail data and tools
 
-### Decisions
+Startup seeds three demo products into `products` (SKU, name, description,
+price, and stock). `orders` and `order_items` record completed purchases with
+the runtime `user_id`.
 
-| Concern | Decision | Why |
-| --- | --- | --- |
-| Agent API | `create_agent` | It is already a LangGraph graph, accepts a checkpointer, and avoids Deep Agents' planning/filesystem/subagent overhead. |
-| Vertex chat model | `ChatGoogleGenerativeAI(..., vertexai=True)` | It is the current Gemini-on-Vertex integration; `ChatVertexAI` is deprecated. |
-| Checkpoint DB | PostgreSQL + `AsyncPostgresSaver` | First-party async persistence, durable interrupts, and a natural home for a tiny `conversations` table. |
-| Thread identity | UUID generated at `POST /threads` | Opaque, collision-resistant, returned to the UI, and used as LangGraph's `configurable.thread_id`. |
-| UI | one React + Tailwind component | Responsive tabs load only the selected conversation; browser speech-to-text is opt-in and local. |
+`find_articles` uses SQLModel to list the catalog or filter it by a
+case-insensitive name match. It returns the agent enough internal data to make a sale, but the prompt
+and tool description tell it to show customers only product name, description,
+and price. It should reveal an exact inventory amount only when a customer
+explicitly asks for the purchase limit.
 
-PostgreSQL wins over MongoDB here. MongoDB has a supported saver and is a good choice when it is already the application's operational database; it adds no advantage to this POC. PostgreSQL makes thread listing and future relational application data simple, while LangGraph owns its checkpoint tables. Do not query those internal tables directly.
+`create_order` pauses for customer approval, then decrements inventory and
+inserts an order in one ORM transaction. If the requested quantity is too high,
+it returns “There is not enough inventory for that purchase” without exposing
+the remaining count. `get_my_recent_orders` stays scoped to the runtime user.
 
-### Compact plan
+## Layout
 
-1. Start PostgreSQL and the API with one Compose command.
-2. Create a UUID thread on its first message and save its title/metadata through SQLModel.
-3. Invoke the compiled `create_agent` graph with that UUID in `configurable.thread_id`.
-4. Let `AsyncPostgresSaver` persist every state update; return either a reply or an interrupt.
-5. Validate and persist the selected approval value with its custom action, then resume with `Command(resume=...)` and the exact same thread ID.
+```text
+app/settings.py     environment configuration
+app/db.py           SQLModel conversation metadata and async sessions
+app/tools/          small, independently understandable agent tools
+app/langgraph.py    Deep Agent, durable backend, skills, response helpers
+app/main.py         FastAPI lifecycle and routes
+skills/*/SKILL.md   local instructions exposed to the agent
+frontend/           one responsive React/Tailwind chat page
+```
 
-## Run it
+There are deliberately no service or repository layers.
 
-1. Enable Vertex AI, then create local Application Default Credentials:
+## Run
+
+1. Authenticate locally with Vertex AI ADC and enable the API:
 
    ```bash
    gcloud services enable aiplatform.googleapis.com
    gcloud auth application-default login
-   ```
-
-2. Copy the environment template, then replace the project ID and ADC path with real values:
-
-   ```bash
    cp .env.example .env
    ```
 
-3. Start the whole demo:
+2. Set `GOOGLE_CLOUD_PROJECT` and the absolute `GCP_ADC_PATH` in `.env`, then:
 
    ```bash
    docker compose up --build
    ```
 
-Open `http://localhost:8000`. The API docs are at `/docs`.
+Open `http://localhost:8000`; API documentation is at `/docs`.
 
-This Compose setup intentionally binds both the API and PostgreSQL to `127.0.0.1`: it is a local demo, not an authenticated multi-user deployment. The PostgreSQL binding lets `uv run python clear_db.py --yes` connect from your host. Add authentication and pagination before exposing it on a network.
+The Compose ports bind to `127.0.0.1`. PostgreSQL is therefore reachable from
+your host by `clear_db.py`; there is no need to enter the API container.
 
-For local backend work, start PostgreSQL with Compose, set `DATABASE_URL` to its exposed host address, and run `uv run uvicorn app.main:app --reload`. For frontend hot reload, run `npm run dev` in `frontend/`; Vite proxies API requests to port 8000.
+This POC deliberately has no migration framework or Docker initialization
+scripts. At API startup:
 
-## The flow to explain
+1. `SQLModel.metadata.create_all()` creates missing application tables only. It
+   never alters existing tables or columns; change the schema manually (or add
+   Alembic) when the model changes.
+2. `seed_catalog()` upserts the three demo products by SKU. It refreshes their
+   name, description, price, and reset-stock value, but preserves current stock
+   so a completed sale survives an API restart.
+3. `clear_db.py --yes` clears orders and restores each product's current stock
+   from its seeded reset-stock value.
 
-```text
-React UI → FastAPI route → create_agent (LangGraph) → Vertex AI
-                 │                  │
-                 └── SQLModel ──────┴── AsyncPostgresSaver
-                     conversation        messages + checkpoints + interrupts
-                     metadata only
-```
+Restart or rebuild the API after changing `CATALOG`; the catalog fields above
+will update without deleting conversations or orders. Reset the local data only
+when you want a completely fresh demo.
 
-The `thread_id` deliberately lives in LangGraph config, not mutable graph state. State is loaded only after LangGraph knows which durable thread to retrieve. A UUID is created once, persisted as app metadata, returned to the browser, and reused for every message and resume.
+## Deep Agent pieces to explain
 
-## API surface
+The app uses `create_deep_agent`, which adds an agent harness (planning and a
+filesystem-style backend) on top of LangGraph. Its backend routes are small:
 
-| Route | Purpose |
-| --- | --- |
-| `POST /threads` | Create and return a UUID-backed conversation. |
-| `GET /threads` | List saved conversation metadata. |
-| `GET /threads/{thread_id}` | Load that thread's persisted messages and pending interrupt. |
-| `POST /threads/{thread_id}/messages` | Add a turn and run the graph. |
-| `POST /threads/{thread_id}/resume` | Continue a paused graph with `{ "approved": true | false }`. |
+- scratch files: thread-scoped `StateBackend()`;
+- `/skills/`: read-only, durable SKILL.md files shared by the local agent;
+- `/memories/`: durable PostgreSQL data scoped to `LOCAL_USER_ID`, usable in a
+  new conversation after restart.
 
-## Pattern cheat sheet
+The selling flow is concrete: search a product by name, answer with its live
+price, confirm the product and quantity, then call `create_order`.
 
-The running demo uses `ToolStrategy(FinalResponse)` plus an interrupting approval tool. That makes every normal answer a validated tool call. Keep the following patterns separate; combining a forced ordinary tool with a structured-final tool makes two tools compete for the same model turn.
+`skills/retail-sales/SKILL.md` is seeded into the durable store at API
+startup. Add another directory containing `SKILL.md`, rebuild/restart, then
+start a new conversation: a thread snapshots its skill metadata when it is
+created. The agent is denied writes to `/skills/`.
 
-### 1. End immediately from a tool
+`StoreBackend` only makes `/memories/` durable; it does not decide what is worth
+remembering. StoreMate gives the AI two store-backed tools instead:
+`save_customer_memory` and `read_customer_memory`. The system prompt and retail
+skill direct the agent to save an explicitly stated, non-sensitive customer fact
+before answering, and to read memory before answering a personal question. Thus
+“my name is Justin” can be saved in one chat and retrieved in another without
+hardcoded phrase matching. The model is responsible for choosing the tools, so
+it remains an agentic workflow rather than API-side extraction.
+
+The exact structured-output pattern remains supported by Deep Agents:
 
 ```python
-from langchain.tools import tool
+agent = create_deep_agent(
+    model=model,
+    tools=[current_utc_time, read_customer_memory, save_customer_memory, *retail_tools(session_factory)],
+    backend=backend,
+    skills=["/skills/"],
+    response_format=ToolStrategy(FinalResponse),
+    checkpointer=checkpointer,
+    store=store,
+)
+```
 
+Every completed normal turn yields `FinalResponse(answer: str)`, so FastAPI can
+return a predictable `reply`. Keep this separate from an end tool:
+
+```python
 @tool(return_direct=True)
-def lookup_status(job_id: str) -> str:
-    """Return the status of one job."""
+def status(job_id: str) -> str:
     return "complete"
 ```
 
-`return_direct=True` ends the agent run with the tool result. It is useful when a raw tool result is the HTTP response, but it intentionally bypasses a structured final response.
+`return_direct=True` intentionally ends the turn with raw tool output. It is
+useful for a response tool, but it bypasses the structured final-answer tool.
 
-### 2. Return validated structured output
+`create_order` calls `interrupt()` with its custom action. The API persists the
+selected strict boolean and then resumes the same
+`thread_id` with `Command(resume=...)`. Keep work before `interrupt()`
+idempotent because the interrupted node executes again on resume.
 
-```python
-from langchain.agents import create_agent
-from langchain.agents.structured_output import ToolStrategy
-from pydantic import BaseModel
+## API
 
-class FinalResponse(BaseModel):
-    answer: str
-    confidence: float
+| Route | Purpose |
+| --- | --- |
+| `POST /threads` | Create a UUID-backed conversation. |
+| `GET /threads` | List conversation metadata. |
+| `GET /threads/{thread_id}` | Load one selected thread and its pending interrupt. |
+| `POST /threads/{thread_id}/messages` | Add a turn. |
+| `POST /threads/{thread_id}/resume` | Resume with `{ "approved": true }` or `false`. |
 
-agent = create_agent(
-    model=model,
-    tools=tools,
-    response_format=ToolStrategy(FinalResponse),
-    checkpointer=checkpointer,
-)
-result = await agent.ainvoke({"messages": [("user", "Summarize this")]}, config)
-final = result["structured_response"]
-```
+The UI only fetches the selected conversation; threads are sorted by creation
+time and a new title displays its first message, then its creation date and
+hour on a separate line.
 
-`ToolStrategy` uses tool calling, validates the schema, and returns `structured_response`. This is the pattern used by `app/langgraph.py`: every non-interrupted turn ends via `FinalResponse`, so the API reads its `answer` field predictably.
+## Speech input
 
-### 3. Require a tool call
+The UI has an explicit **Español** (`es-MX`) / **English** (`en-US`) selector.
+It invokes the browser's Web Speech API (`SpeechRecognition` or Chrome's
+`webkitSpeechRecognition`) and sends only the transcript to FastAPI.
 
-```python
-required_model = model.bind_tools(tools, tool_choice="required")
-tool_only_agent = create_agent(required_model, tools=tools, checkpointer=checkpointer)
-```
+This app does **not** bundle, call, or choose a speech-to-text model. Chrome
+provides the recognition implementation and may use its own services; exact
+availability and processing depend on the browser and device. Chrome and Edge
+are the most practical choices for this demo. Audio file uploads would be a
+different feature: receive multipart audio and transcribe it server-side or
+use a multimodal model.
 
-With Gemini, `tool_choice="required"` (or `"any"`) makes the model choose a tool. Use this as a dedicated mode, not beside the structured-final pattern above.
+## LangSmith
 
-### 4. Pause and resume safely
+Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and `LANGSMITH_PROJECT` in
+`.env`. LangChain automatically emits traces; no application wrapper is needed.
 
-```python
-from langchain.tools import tool
-from langgraph.types import Command, interrupt
-from pydantic import BaseModel, StrictBool
+## Reset local data
 
-class InterruptBoolValidator(BaseModel):
-    action: str
-    approved: StrictBool
-
-@tool
-def request_approval(action: str) -> str:
-    approved = interrupt({"kind": "approval", "action": action})
-    return InterruptBoolValidator(action=action, approved=approved).model_dump_json()
-
-config = {"configurable": {"thread_id": thread_id}}
-await agent.ainvoke(Command(resume=True), config)
-```
-
-The action is supplied dynamically by the model; the resume value is strict boolean. The application saves both on the `Conversation` row before resuming, so the selected decision remains visible after refresh. An interrupted node restarts from its beginning on resume. Keep work before `interrupt()` free of side effects, or make it idempotent.
-
-## LangSmith traces
-
-Set `LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, and `LANGSMITH_PROJECT` in `.env`. LangChain automatically emits traces to that project—no tracing code or wrapper is needed. Do not commit `.env`.
-
-## Voice input and audio uploads
-
-**Speak** uses the browser's Web Speech API: this app receives only the transcript as chat text and does not upload or store audio. Browser implementations may use vendor speech services, and support varies (Chrome/Edge work best).
-
-Sending an audio file to the model is a separate, small feature: add a multipart upload route, store/stream the bytes, then use a model/provider with audio input (or transcribe server-side first). For this concise chat POC I would keep the current browser transcription; it has no storage, upload, or audio-provider concerns.
-
-## Gemini on Vertex vs. literal Model Garden
-
-The default `VERTEX_MODEL=gemini-2.5-flash` uses Gemini through Vertex AI and ADC, the current reliable choice for async chat, tool calling, and structured output. Vertex AI Model Garden also hosts deployed/open-model endpoints. Those are model-specific: do not assume a generic endpoint supports `bind_tools` or `ToolStrategy`.
-
-To experiment with a deployed Model Garden endpoint, install the optional integration and keep it as a separate provider experiment:
+With Compose running, this clears conversations, checkpoints, local customer
+memories, and orders, then restores catalog inventory. It does not delete the
+Docker volume, schema, or repository skills:
 
 ```bash
-uv sync --extra model-garden
+uv run python clear_db.py --yes
 ```
 
-```python
-from langchain_google_vertexai import VertexAIModelGarden
-
-model = VertexAIModelGarden(project="your-project", endpoint_id="your-endpoint")
-```
-
-Smoke-test the chosen model's tool-calling ability before using it with `create_agent`.
+Do not run it while the API is handling requests. The script intentionally does
+not use `CASCADE`, so it fails rather than unexpectedly clearing unrelated
+application data.
 
 ## Verification
 
@@ -198,24 +202,10 @@ uv run ruff check .
 uv run pyright app tests
 ```
 
-The focused tests verify final-response/interrupt mapping, restored structured history, and custom interrupt decisions. They intentionally do not mock Vertex AI or duplicate LangGraph's own persistence tests.
-
-Manual Compose smoke test: start a conversation by sending a message (its title is the first message plus the local time), ask for the UTC time, then ask the agent to approve a deployment. Use **Approve** or **Reject**, refresh the page, and select the same conversation; its checkpointed history should still be present.
-
-To reset this local demo, run the intentionally-confirmed script below. It truncates only `conversation` and the LangGraph checkpoint tables in the database configured by `DATABASE_URL`; it does not remove the Docker volume or database schema. It intentionally fails if those tables have external dependencies, rather than cascading into other application data.
-
-```bash
-uv run python clear_db.py --yes
-```
-
-Run it from your host terminal; there is no need to enter the API container. The project installs SQLAlchemy's `asyncio` extra (including `greenlet`) for this local command.
-
 ## Sources
 
-- [LangGraph persistence and thread memory](https://docs.langchain.com/oss/python/langgraph/add-memory)
-- [LangGraph interrupts and resume](https://docs.langchain.com/oss/python/langgraph/interrupts)
-- [LangChain structured output](https://docs.langchain.com/oss/python/langchain/structured-output)
-- [Tailwind CSS with Vite](https://tailwindcss.com/docs/installation/using-vite)
-- [LangSmith environment configuration](https://docs.langchain.com/langsmith/smith-python-sdk)
-- [Google's current Gemini-on-Vertex integration](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)
-- [Google Application Default Credentials](https://cloud.google.com/docs/authentication/provide-credentials-adc)
+- [Deep Agents](https://docs.langchain.com/oss/python/deepagents/overview)
+- [Deep Agent backends and memory](https://docs.langchain.com/oss/python/deepagents/backends)
+- [LangGraph persistence](https://docs.langchain.com/oss/python/langgraph/add-memory)
+- [LangGraph interrupts](https://docs.langchain.com/oss/python/langgraph/interrupts)
+- [Google Gemini on Vertex AI](https://docs.langchain.com/oss/python/integrations/chat/google_generative_ai)

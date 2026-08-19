@@ -1,8 +1,13 @@
+import asyncio
+
 import pytest
 from langchain_core.messages import AIMessage
+from langgraph.store.memory import InMemoryStore
 
-from app.langgraph import InterruptBoolValidator, persisted_message
+from app.langgraph import SKILLS_NAMESPACE, seed_skills
+from app.langgraph_helpers import persisted_message
 from app.main import graph_result_to_response
+from app.tools.customer_memory import read_customer_facts, save_customer_fact
 
 
 @pytest.mark.parametrize(
@@ -37,7 +42,21 @@ def test_persisted_message_reads_the_final_response_tool_call() -> None:
     assert persisted == ("assistant", "Structured and durable.")
 
 
-def test_interrupt_bool_validator_keeps_the_custom_action() -> None:
-    decision = InterruptBoolValidator(action="deploy the demo", approved=True)
+def test_seed_skills_makes_the_local_skill_available() -> None:
+    store = InMemoryStore()
 
-    assert decision.model_dump() == {"action": "deploy the demo", "approved": True}
+    asyncio.run(seed_skills(store))
+
+    skill = asyncio.run(store.aget(SKILLS_NAMESPACE, "/retail-sales/SKILL.md"))
+    assert skill is not None
+    assert "current_utc_time" in skill.value["content"]
+
+
+def test_agent_saved_customer_fact_is_available_to_a_new_conversation() -> None:
+    store = InMemoryStore()
+
+    async def profile_after_first_chat() -> str:
+        await save_customer_fact(store, "local-user", "Customer's name is Justin.")
+        return "\n".join(await read_customer_facts(store, "local-user"))
+
+    assert asyncio.run(profile_after_first_chat()) == "Customer's name is Justin."

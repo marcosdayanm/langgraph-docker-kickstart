@@ -32,6 +32,7 @@ type Recognition = {
   onend: (() => void) | null;
 };
 type RecognitionConstructor = new () => Recognition;
+type SpeechLanguage = "es-MX" | "en-US";
 type SpeechWindow = Window & {
   SpeechRecognition?: RecognitionConstructor;
   webkitSpeechRecognition?: RecognitionConstructor;
@@ -54,10 +55,13 @@ function titleForFirstMessage(message: string): string {
   const preview =
     firstLine.length > 48 ? `${firstLine.slice(0, 48)}…` : firstLine;
   const time = new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date());
-  return `${preview} · ${time}`;
+  return `${preview}\n${time}`;
 }
 
 export default function App() {
@@ -69,6 +73,9 @@ export default function App() {
   const [draft, setDraft] = useState("");
   const [pending, setPending] = useState(false);
   const [listening, setListening] = useState(false);
+  const [speechLanguage, setSpeechLanguage] = useState<SpeechLanguage>(() =>
+    navigator.language.startsWith("es") ? "es-MX" : "en-US",
+  );
   const [error, setError] = useState("");
 
   const loadThreads = async (): Promise<void> => {
@@ -202,7 +209,7 @@ export default function App() {
     const recognition = new RecognitionApi();
     recognition.continuous = false;
     recognition.interimResults = false;
-    recognition.lang = navigator.language;
+    recognition.lang = speechLanguage;
     recognition.onresult = (event) => {
       const transcript = event.results[0]?.[0]?.transcript.trim();
       if (transcript) setDraft((current) => `${current} ${transcript}`.trim());
@@ -231,7 +238,7 @@ export default function App() {
         <div className="flex items-start justify-between gap-3 md:block">
           <div>
             <p className="font-mono text-xs tracking-widest text-slate-400 uppercase">
-              LangGraph + Vertex
+              LangGraph + Vertex aiiii
             </p>
             <h1 className="mt-1 text-lg font-semibold">Chat</h1>
           </div>
@@ -257,7 +264,7 @@ export default function App() {
               aria-current={thread.thread_id === threadId ? "page" : undefined}
               role="tab"
             >
-              <span className="block truncate">{thread.title}</span>
+              <span className="block whitespace-pre-line">{thread.title}</span>
             </button>
           ))}
         </nav>
@@ -348,7 +355,7 @@ export default function App() {
           <label className="mb-2 block text-sm font-medium" htmlFor="message">
             Message
           </label>
-          <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto]">
+          <div className="grid gap-2 sm:grid-cols-[1fr_auto_auto_auto]">
             <textarea
               className="min-h-24 w-full rounded-md border border-slate-700 bg-slate-900 p-3 text-sm outline-none placeholder:text-slate-500 focus:border-emerald-400 disabled:opacity-50"
               id="message"
@@ -359,6 +366,21 @@ export default function App() {
               disabled={pending || Boolean(interrupt)}
               rows={2}
             />
+            <label className="sr-only" htmlFor="speech-language">
+              Speech language
+            </label>
+            <select
+              className="rounded-md border border-slate-600 bg-slate-900 px-2 text-sm disabled:opacity-50"
+              id="speech-language"
+              value={speechLanguage}
+              onChange={(event) =>
+                setSpeechLanguage(event.target.value as SpeechLanguage)
+              }
+              disabled={pending || Boolean(interrupt) || listening}
+            >
+              <option value="es-MX">Español</option>
+              <option value="en-US">English</option>
+            </select>
             <button
               className="rounded-md border border-slate-600 px-3 py-2 text-sm font-semibold hover:border-slate-300 disabled:opacity-50"
               type="button"
@@ -376,8 +398,8 @@ export default function App() {
             </button>
           </div>
           <p className="mt-2 text-xs text-slate-500">
-            Enter sends · Shift+Enter adds a line · Speak sends only the
-            transcript to this app.
+            Enter sends · Shift+Enter adds a line · Speak uses your browser's
+            speech recognition and sends only its transcript to this app.
           </p>
         </form>
       </section>
