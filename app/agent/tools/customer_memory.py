@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections import defaultdict
 from collections.abc import Mapping
 
 from langchain.tools import ToolRuntime, tool
@@ -9,6 +11,11 @@ from langgraph.store.base import BaseStore
 
 MEMORY_KEY = "profile"
 PROFILE_NAMESPACE = "retail-customer"
+
+# BaseStore has no compare-and-swap, so save_customer_fact's read-modify-write
+# would otherwise drop a fact when two calls race for the same user. A
+# per-user lock is enough because the API runs as a single process.
+_user_locks: defaultdict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 def profile_namespace(user_id: str) -> tuple[str, str]:
@@ -24,10 +31,11 @@ async def read_customer_facts(store: BaseStore, user_id: str) -> tuple[str, ...]
 
 async def save_customer_fact(store: BaseStore, user_id: str, fact: str) -> None:
     """Append one agent-selected fact without duplicate entries."""
-    facts = await read_customer_facts(store, user_id)
-    normalized = fact.strip()
-    updated_facts = (*facts, normalized) if normalized and normalized not in facts else facts
-    await store.aput(profile_namespace(user_id), MEMORY_KEY, {"facts": list(updated_facts[-10:])})
+    async with _user_locks[user_id]:
+        facts = await read_customer_facts(store, user_id)
+        normalized = fact.strip()
+        updated_facts = (*facts, normalized) if normalized and normalized not in facts else facts
+        await store.aput(profile_namespace(user_id), MEMORY_KEY, {"facts": list(updated_facts[-10:])})
 
 
 @tool

@@ -20,14 +20,15 @@ from langgraph.store.postgres.aio import AsyncPostgresStore
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.langgraph_helpers import FinalResponse
+from app.agent.prompt import AGENT_SYSTEM_PROMPT
+from app.agent.responses import FinalResponse
+from app.agent.tools.customer_memory import read_customer_memory, save_customer_memory
+from app.agent.tools.retail import retail_tools
+from app.agent.tools.time import current_utc_time
 from app.settings import Settings
-from app.tools.customer_memory import read_customer_memory, save_customer_memory
-from app.tools.retail import retail_tools
-from app.tools.time import current_utc_time
 
 SKILLS_NAMESPACE = ("deep-agent", "skills")
-SKILLS_PATH = Path(__file__).parents[1] / "skills"
+SKILLS_PATH = Path(__file__).parents[2] / "skills"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,9 +55,21 @@ def build_backend(store: AsyncPostgresStore) -> CompositeBackend:
 
 
 async def seed_skills(store: BaseStore) -> None:
-    """Make every local SKILL.md available through the durable `/skills/` backend."""
-    for skill_file in sorted(SKILLS_PATH.rglob("SKILL.md")):
-        key = f"/{skill_file.relative_to(SKILLS_PATH).as_posix()}"
+    """Sync the durable `/skills/` backend with the local SKILL.md files on disk.
+
+    Upserts every skill currently on disk and removes store entries for
+    skills that were renamed or deleted, so a stale skill never outlives the
+    file it came from.
+    """
+    disk_skills = {
+        f"/{skill_file.relative_to(SKILLS_PATH).as_posix()}": skill_file
+        for skill_file in SKILLS_PATH.rglob("SKILL.md")
+    }
+    existing = await store.asearch(SKILLS_NAMESPACE, limit=1000)
+    for item in existing:
+        if item.key not in disk_skills:
+            await store.adelete(SKILLS_NAMESPACE, item.key)
+    for key, skill_file in disk_skills.items():
         skill_data = cast(dict[str, Any], create_file_data(skill_file.read_text()))
         await store.aput(SKILLS_NAMESPACE, key, skill_data)
 
@@ -88,22 +101,8 @@ def build_agent(
         context_schema=AgentContext,
         skills=["/skills/"],
         permissions=[FilesystemPermission(operations=["write"], paths=["/skills/**"], mode="deny")],
-        # Deep Agents accepts ToolStrategy, so the normal REST response remains typed.
         response_format=ToolStrategy(FinalResponse),
-        system_prompt=(
-            "You are StoreMate, a decisive retail sales assistant. Help customers discover products, "
-            "check live inventory, explain pricing, and complete an approved purchase. Use find_articles "
-            "for catalog questions. Its SKU and stock fields are internal: never volunteer either. If a "
-            "requested quantity cannot be purchased, say there is not enough inventory. Reveal an exact "
-            "inventory amount only when the customer explicitly asks for their purchase limit. "
-            "Use create_order only after its customer approval interrupt. Keep useful customer facts in "
-            "durable memory. When a customer explicitly states a useful, "
-            "non-sensitive personal fact or shopping preference, call save_customer_memory before "
-            "answering. When asked about that customer or their preferences, call read_customer_memory "
-            "before answering; never guess. Do not store payment data, passwords, or full addresses. "
-            "Use current_utc_time for time questions. "
-            "Finish every normal response with the FinalResponse tool."
-        ),
+        system_prompt=AGENT_SYSTEM_PROMPT,
     )
 
 

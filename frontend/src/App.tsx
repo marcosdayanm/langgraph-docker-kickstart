@@ -4,10 +4,8 @@ type Conversation = {
   thread_id: string;
   title: string;
   created_at: string;
-  last_interrupt_action: string | null;
-  last_interrupt_approved: boolean | null;
 };
-type Message = { role: "user" | "assistant"; content: string };
+type Message = { role: "user" | "assistant" | "decision"; content: string };
 type Interrupt = { kind: string; action?: string };
 type ThreadState = {
   conversation: Conversation;
@@ -137,34 +135,22 @@ export default function App() {
     setError("");
   };
 
-  const sendMessage = async (event: FormEvent): Promise<void> => {
-    event.preventDefault();
-    const message = draft.trim();
-    if (!message || pending || interrupt) return;
-
+  // Shared by sendMessage and resume: both just fire one graph turn and
+  // apply the same interrupt/reply/error handling to its response.
+  const runTurn = async (
+    action: () => Promise<ChatResponse>,
+  ): Promise<void> => {
     setPending(true);
     setError("");
     try {
-      const activeThreadId = threadId ?? (await createThread(message));
-      setMessages((current) => [
-        ...current,
-        { role: "user", content: message },
-      ]);
-      setDraft("");
-      const result = await request<ChatResponse>(
-        `/threads/${activeThreadId}/messages`,
-        {
-          method: "POST",
-          body: JSON.stringify({ message }),
-        },
-      );
+      const result = await action();
       setInterrupt(result.interrupt);
-      const reply = result.reply;
-      if (reply)
+      if (result.reply) {
         setMessages((current) => [
           ...current,
-          { role: "assistant", content: reply },
+          { role: "assistant", content: result.reply as string },
         ]);
+      }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "Request failed");
     } finally {
@@ -172,30 +158,32 @@ export default function App() {
     }
   };
 
-  const resume = async (approved: boolean): Promise<void> => {
-    if (!threadId) return;
-    setPending(true);
-    setError("");
-    try {
-      const result = await request<ChatResponse>(
-        `/threads/${threadId}/resume`,
-        {
-          method: "POST",
-          body: JSON.stringify({ approved }),
-        },
-      );
-      setInterrupt(result.interrupt);
-      const reply = result.reply;
-      if (reply)
-        setMessages((current) => [
-          ...current,
-          { role: "assistant", content: reply },
-        ]);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Request failed");
-    } finally {
-      setPending(false);
-    }
+  const sendMessage = (event: FormEvent): Promise<void> => {
+    event.preventDefault();
+    const message = draft.trim();
+    if (!message || pending || interrupt) return Promise.resolve();
+    return runTurn(async () => {
+      const activeThreadId = threadId ?? (await createThread(message));
+      setMessages((current) => [
+        ...current,
+        { role: "user", content: message },
+      ]);
+      setDraft("");
+      return request<ChatResponse>(`/threads/${activeThreadId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ message }),
+      });
+    });
+  };
+
+  const resume = (approved: boolean): Promise<void> => {
+    if (!threadId) return Promise.resolve();
+    return runTurn(() =>
+      request<ChatResponse>(`/threads/${threadId}/resume`, {
+        method: "POST",
+        body: JSON.stringify({ approved }),
+      }),
+    );
   };
 
   const startSpeechToText = (): void => {
@@ -228,17 +216,13 @@ export default function App() {
     }
   };
 
-  const hasDecision =
-    conversation?.last_interrupt_action &&
-    conversation.last_interrupt_approved !== null;
-
   return (
     <main className="min-h-screen bg-slate-950 md:grid md:grid-cols-[17rem_minmax(0,1fr)]">
       <aside className="border-b border-slate-800 bg-slate-900 p-4 md:border-r md:border-b-0">
         <div className="flex items-start justify-between gap-3 md:block">
           <div>
             <p className="font-mono text-xs tracking-widest text-slate-400 uppercase">
-              LangGraph + Vertex aiiii
+              LangGraph + Vertex AI
             </p>
             <h1 className="mt-1 text-lg font-semibold">Chat</h1>
           </div>
@@ -285,13 +269,6 @@ export default function App() {
             Each tab loads only its selected thread. Ask for UTC time or request
             an approval.
           </p>
-          {hasDecision && (
-            <p className="mt-2 text-sm text-emerald-300">
-              Last decision:{" "}
-              {conversation.last_interrupt_approved ? "approved" : "rejected"} —{" "}
-              {conversation.last_interrupt_action}
-            </p>
-          )}
         </header>
 
         <div
@@ -304,17 +281,26 @@ export default function App() {
               Your thread is stored in PostgreSQL.
             </p>
           )}
-          {messages.map((message, index) => (
-            <article
-              className={`max-w-2xl rounded-lg border px-4 py-3 text-sm leading-6 ${message.role === "user" ? "justify-self-end border-slate-600 bg-slate-800" : "justify-self-start border-slate-800 bg-slate-900"}`}
-              key={`${message.role}-${index}`}
-            >
-              <p className="font-mono text-xs text-slate-400">
-                {message.role === "user" ? "You" : "Agent"}
+          {messages.map((message, index) =>
+            message.role === "decision" ? (
+              <p
+                className={`justify-self-center rounded-full border px-4 py-1.5 text-xs font-semibold ${message.content.startsWith("Approved") ? "border-emerald-400/60 bg-emerald-400/10 text-emerald-300" : "border-slate-600 bg-slate-800 text-slate-300"}`}
+                key={`decision-${index}`}
+              >
+                {message.content}
               </p>
-              <p className="mt-1 whitespace-pre-wrap">{message.content}</p>
-            </article>
-          ))}
+            ) : (
+              <article
+                className={`max-w-2xl rounded-lg border px-4 py-3 text-sm leading-6 ${message.role === "user" ? "justify-self-end border-slate-600 bg-slate-800" : "justify-self-start border-slate-800 bg-slate-900"}`}
+                key={`${message.role}-${index}`}
+              >
+                <p className="font-mono text-xs text-slate-400">
+                  {message.role === "user" ? "You" : "Agent"}
+                </p>
+                <p className="mt-1 whitespace-pre-wrap">{message.content}</p>
+              </article>
+            ),
+          )}
           {pending && <p className="text-sm text-slate-400">Working…</p>}
         </div>
 

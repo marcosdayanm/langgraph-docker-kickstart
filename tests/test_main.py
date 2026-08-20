@@ -4,10 +4,10 @@ import pytest
 from langchain_core.messages import AIMessage
 from langgraph.store.memory import InMemoryStore
 
-from app.langgraph import SKILLS_NAMESPACE, seed_skills
-from app.langgraph_helpers import persisted_message
+from app.agent.graph import SKILLS_NAMESPACE, seed_skills
+from app.agent.responses import persisted_message
+from app.agent.tools.customer_memory import read_customer_facts, save_customer_fact
 from app.main import graph_result_to_response
-from app.tools.customer_memory import read_customer_facts, save_customer_fact
 
 
 @pytest.mark.parametrize(

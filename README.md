@@ -42,13 +42,16 @@ the remaining count. `get_my_recent_orders` stays scoped to the runtime user.
 ## Layout
 
 ```text
-app/settings.py     environment configuration
-app/db.py           SQLModel conversation metadata and async sessions
-app/tools/          small, independently understandable agent tools
-app/langgraph.py    Deep Agent, durable backend, skills, response helpers
-app/main.py         FastAPI lifecycle and routes
-skills/*/SKILL.md   local instructions exposed to the agent
-frontend/           one responsive React/Tailwind chat page
+app/settings.py       environment configuration
+app/db.py             SQLModel conversation metadata and async sessions
+app/bootstrap.py       database, checkpointer/store, and agent wiring for the lifespan
+app/agent/prompt.py    the Deep Agent's system prompt
+app/agent/tools/       small, independently understandable agent tools
+app/agent/graph.py     Deep Agent, durable backend, skills
+app/agent/responses.py adapters between LangGraph values and the API response models
+app/main.py            FastAPI routes
+skills/*/SKILL.md      local instructions exposed to the agent
+frontend/              one responsive React/Tailwind chat page
 ```
 
 There are deliberately no service or repository layers.
@@ -143,8 +146,10 @@ def status(job_id: str) -> str:
 `return_direct=True` intentionally ends the turn with raw tool output. It is
 useful for a response tool, but it bypasses the structured final-answer tool.
 
-`create_order` calls `interrupt()` with its custom action. The API persists the
-selected strict boolean and then resumes the same
+`create_order` calls `interrupt()` with its custom action. `resume_thread`
+records the customer's decision as a `HumanMessage` via `agent.aupdate_state`
+— the same durable message history everything else lives in, not a separate
+database column that could disagree with it — then resumes the same
 `thread_id` with `Command(resume=...)`. Keep work before `interrupt()`
 idempotent because the interrupted node executes again on resume.
 

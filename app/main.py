@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Mapping, Sequence
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Annotated, Literal, cast
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.staticfiles import StaticFiles
-from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
-from langgraph.store.postgres.aio import AsyncPostgresStore
+from langchain_core.messages import HumanMessage
 from langgraph.types import Command
 from pydantic import BaseModel, Field, StrictBool, field_validator
 from sqlalchemy import desc
@@ -19,21 +18,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.db import Conversation, create_database, create_tables, seed_catalog
-from app.langgraph import (
-    Agent,
-    AgentContext,
-    build_agent,
-    graph_config,
-    seed_skills,
-)
-from app.langgraph_helpers import (
+from app.agent.graph import Agent, AgentContext, graph_config
+from app.agent.responses import (
+    DECISION_MESSAGE_NAME,
     interrupt_value,
     persisted_message,
     state_interrupt,
     structured_answer,
 )
-from app.settings import Settings, load_settings
+from app.bootstrap import create_app_state
+from app.db import Conversation
+from app.settings import Settings
 
 
 class ThreadCreate(BaseModel):
@@ -71,7 +66,7 @@ class ChatResponse(BaseModel):
 
 
 class ChatMessage(BaseModel):
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "decision"]
     content: str
 
 
@@ -122,26 +117,13 @@ async def require_conversation(session: AsyncSession, thread_id: UUID) -> Conver
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    settings = load_settings()
-    engine, session_factory = create_database(settings)
-    await create_tables(engine)
-    await seed_catalog(session_factory)
-    async with AsyncPostgresSaver.from_conn_string(
-        settings.database_url
-    ) as checkpointer, AsyncPostgresStore.from_conn_string(settings.database_url) as store:
-        await checkpointer.setup()
-        await store.setup()
-        await seed_skills(store)
-        app.state.agent = build_agent(
-            settings,
-            checkpointer,
-            store,
-            session_factory,
-        )
-        app.state.session_factory = session_factory
-        app.state.settings = settings
+    async with AsyncExitStack() as stack:
+        state = await create_app_state(stack)
+        app.state.agent = state.agent
+        app.state.session_factory = state.session_factory
+        app.state.settings = state.settings
         yield
-    await engine.dispose()
+    await state.engine.dispose()
 
 
 app = FastAPI(title="StoreMate Retail Sales Agent", lifespan=lifespan)
@@ -209,10 +191,15 @@ async def resume_thread(
     pending_interrupt = state_interrupt(await agent.aget_state(config))
     if pending_interrupt is None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This thread is not paused.")
-    conversation.last_interrupt_action = str(pending_interrupt.get("action", "approval"))
-    conversation.last_interrupt_approved = payload.approved
-    session.add(conversation)
-    await session.commit()
+
+    # The decision is the durable record: append it to the same message
+    # history the checkpointer already persists, instead of a separate
+    # database column that could disagree with the graph's actual state.
+    action = str(pending_interrupt.get("action", "this action"))
+    decision_text = f"{'Approved' if payload.approved else 'Rejected'}: {action}"
+    await agent.aupdate_state(
+        config, {"messages": [HumanMessage(content=decision_text, name=DECISION_MESSAGE_NAME)]}
+    )
     result = await agent.ainvoke(
         Command(resume=payload.approved),
         config,

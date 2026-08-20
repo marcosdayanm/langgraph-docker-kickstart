@@ -19,8 +19,6 @@ class Conversation(SQLModel, table=True):
     user_id: str = Field(default="local-user", max_length=100)
     title: str = Field(max_length=100)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
-    last_interrupt_action: str | None = Field(default=None, max_length=500)
-    last_interrupt_approved: bool | None = Field(default=None)
 
 
 class Product(SQLModel, table=True):

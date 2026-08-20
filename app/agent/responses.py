@@ -8,6 +8,12 @@ from typing import Literal
 from langgraph.types import Interrupt, StateSnapshot
 from pydantic import BaseModel, Field
 
+# Tags the HumanMessage that resume_thread records for an interrupt decision,
+# so persisted_message can surface it as its own "decision" role instead of a
+# regular user turn. This is the durable record of the decision: there is no
+# separate database column for it.
+DECISION_MESSAGE_NAME = "decision"
+
 
 class FinalResponse(BaseModel):
     """The validated response returned by every completed normal turn."""
@@ -47,10 +53,13 @@ def structured_answer(value: object) -> str | None:
     return None
 
 
-def persisted_message(message: object) -> tuple[Literal["user", "assistant"], str] | None:
+def persisted_message(message: object) -> tuple[Literal["user", "assistant", "decision"], str] | None:
     """Map persisted Deep Agent messages to the compact API chat shape."""
     message_type = getattr(message, "type", "")
+    name = message.get("name") if isinstance(message, Mapping) else getattr(message, "name", None)
     content = message.get("content") if isinstance(message, Mapping) else getattr(message, "content", "")
+    if message_type == "human" and name == DECISION_MESSAGE_NAME and (text := content_to_text(content)):
+        return "decision", text
     if message_type == "human" and (text := content_to_text(content)):
         return "user", text
     if message_type == "ai":
